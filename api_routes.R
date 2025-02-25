@@ -108,7 +108,8 @@ app$post('/flight', function(req, res){
 ##GET /check-delay/:id
 
 app$get("/check-delay/:id", function(req, res) {
-  flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %s", req$params$id))
+  id<-req$params$id
+  flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %s", id))
   if (nrow(flight) != 0) {
     delayed_status <- flight$delayed
     return(res$json(list(delayed = delayed_status)))
