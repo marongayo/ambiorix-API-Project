@@ -63,11 +63,10 @@ dbWriteTable(conn, "avg_delay", avg_delay, append = TRUE)
 dbWriteTable(conn, "top_destinations", top_destinations, append = TRUE)
 dbDisconnect(conn)
 
-conn <- dbConnect(SQLite(), "flights.db")
-
 
 app <- Ambiorix$new()
-
+conn <- dbConnect(SQLite(), "flights.db")
+ 
 
 # GET /flight/:id - Get flight details by ID
 app$get("/flight/:id", function(req, res) {
