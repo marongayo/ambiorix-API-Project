@@ -5,8 +5,9 @@ library(data.table)
 
 
 
+flights_dt <- (nycflights13::flights)
 flights_dt <- as.data.table(nycflights13::flights)
-flights_dt[, delayed := dep_delay > 15]
+flights_dt[, delayed := ifelse(is.na(dep_delay), NA, dep_delay > 15)]
 
 avg_delay <- flights_dt[, .(avg_dep_delay = mean(dep_delay, na.rm = TRUE)), by = carrier]
 top_destinations <- flights_dt[, .N, by = dest][order(-N)]
@@ -64,113 +65,194 @@ dbWriteTable(conn, "top_destinations", top_destinations, append = TRUE)
 dbDisconnect(conn)
 
 
-app <- Ambiorix$new()
+
+
 conn <- dbConnect(SQLite(), "flights.db")
- 
 
-# GET /flight/:id - Get flight details by ID
-app$get("/flight/:id", function(req, res) {
-  flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %s", req$params$id))
-  if (nrow(flight) != 0) {
-    return(res$set_status(201L)$json(flight))
-  }else{
-    
-    # otherwise it is a bad request change response status to 400
-    msg <-  sprintf("There's no Flight with id  %s", req$params$id)
-    return(res$set_status(400L)$json(msg))
-  } 
-})
-
-
-
-#POST Endpoint Logic
+## Perser function
 # Credit: https://ambiorix.dev/blog/parse-raw-json/
-
 box::use(
   webutils[parse_http],
 )
-parse_req <- \(req) {
-  parse_http(
-    body = req$rook.input$read(),
-    content_type = req$CONTENT_TYPE
-  )
+parse_req <- function(req) {
+  tryCatch({
+    parse_http(
+      body = req$rook.input$read(),
+      content_type = req$CONTENT_TYPE
+    )
+  }, error = function(e) {
+    return(NULL)
+  })
 }
 
 
-app$post('/flight', function(req, res){
-  content <- parse_req(req)
-  content<-as.data.table(content)
-  dbWriteTable(conn, "flights", content, append = TRUE)
- return( res$json(content))
-})
+
+# GET /flight/:id - Get flight details by ID handler function
 
 
-##GET /check-delay/:id
-
-app$get("/check-delay/:id", function(req, res) {
-  id<-req$params$id
-  flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %s", id))
-  if (nrow(flight) != 0) {
-    delayed_status <- flight$delayed
-    return(res$json(list(delayed = delayed_status)))
-  }else{
-    
-    # otherwise it is a bad request change response status to 400
-    msg <-  sprintf("There's no Flight with id  %s", req$params$id)
-    return(res$set_status(400L)$json(msg))
-  } 
-})
-
-
+get_flights<-function(req, res) {
+  id <- suppressWarnings(as.integer(req$params$id))
+  if (is.na(id) || id <= 0) {
+    return(res$set_status(400L)$json(list(error = "Invalid flight ID.")))
+  }
+  
+  # fetch flight from the db
+  flight <- dbGetQuery(conn, "SELECT * FROM flights WHERE id = ?", params = list(id))
+  
+  if (nrow(flight) == 0) {
+    return(res$set_status(404L)$json(list(error = sprintf("No flight found with ID %s", id))))
+  }
+  
+  return(res$set_status(200L)$json(flight))
+}
 
 
-# GET /avg-dep-delay?id=given-airline-name
+## POST Request handler function
 
-app$get("/avg-dep-delay", function(req, res) {
+
+post_flight<-function(req, res) {
+  content <- tryCatch({
+    parsed_content <- parse_req(req)
+    if(is.null(parsed_content)){
+      return(res$set_status(400L)$json(list(error = " missing request body.")))
+    }
+    parsed_content=as.data.table(parsed_content)
+  }, error = function(e) {
+    return(res$set_status(400L)$json(list(error = "Invalid  request body.")))
+  })
+  
+  
+  # Drop 'id' if it exists in request body
+  if ("id" %in% names(content)) {
+    content[, id := NULL]
+  }
+  
+  # Insert into database
+  success <- tryCatch({
+    dbWriteTable(conn, "flights", content, append = TRUE)
+    last_id <- dbGetQuery(conn, "SELECT last_insert_rowid() AS id")$id
+    last_id
+  }, error = function(e) {
+    return(res$set_status(500L)$json(list(error = "Database error. Could not save flight.")))
+  })
+  
+  new_flight <- dbGetQuery(conn, "SELECT * FROM flights WHERE id = ?", params = list(success))
+  
+  return(res$set_status(201L)$json(list(message = "Flight added successfully", data = new_flight)))
+}
+
+
+
+##GET /check-delay/:id request handler function
+check_delay<- function(req, res) {
+  #validating flight id parameter
+  id <- suppressWarnings(as.integer(req$params$id))
+  if (is.na(id) || id <= 0) {
+    return(res$set_status(400L)$json(list(error = "Invalid flight ID.")))
+  }
+  
+  
+  flight <- tryCatch({
+    dbGetQuery(conn, "SELECT delayed FROM flights WHERE id = ?", params = list(id))
+  }, error = function(e) {
+    return(res$set_status(500L)$json(list(error = "Database error occurred.")))
+  })
+  
+  if (nrow(flight) == 0) {
+    return(res$set_status(404L)$json(list(error = sprintf("No flight found with ID %s", id))))
+  }
+  return(res$json(list(delayed = flight$delayed[1])))
+}
+
+
+# GET /avg-dep-delay?id=given-airline-name handler function n
+avg_dep_delay<-function(req, res) {
   airline <- req$query$id
   
-  if (is.null(airline)) {
-    # If no airline is provided, return all the airlines
-    carrier <- dbGetQuery(conn, "SELECT carrier, avg_dep_delay FROM avg_delay")
-  } else {
-    carrier <- dbGetQuery(conn, sprintf("SELECT avg_dep_delay FROM avg_delay WHERE carrier = '%s'", airline))
+  # If no airline is provided, return all airlines' average delays
+  if (is.null(airline) || airline == "") {
+    carrier <- tryCatch({
+      dbGetQuery(conn, "SELECT carrier, avg_dep_delay FROM avg_delay")
+    }, error = function(e) {
+      return(res$set_status(500L)$json(list(error = "Database error occurred.")))
+    })
     
-    if (nrow(carrier) == 0) {
-      msg <- sprintf("There's no flight data for airline %s", airline)
-      return(res$set_status(400L)$json(list(error = msg)))
-    }
+    return(res$json(carrier))
   }
   
+  # Validate airline input
+  airline <- gsub("[^a-zA-Z0-9]", "", airline)
+  
+  carrier <- tryCatch({
+    dbGetQuery(conn, "SELECT avg_dep_delay FROM avg_delay WHERE carrier = ?", params = list(airline))
+  }, error = function(e) {
+    return(res$set_status(500L)$json(list(error = "Database error occurred.")))
+  })
+  if (nrow(carrier) == 0) {
+    return(res$set_status(404L)$json(list(error = sprintf("No flight data found for airline %s", airline))))
+  }
   return(res$json(carrier))
-})
+}
 
 
 
+##GET /top-destinations/:n request handler function
 
-##GET /top-destinations/:n
-
-app$get("/top-destinations/:n", function(req, res) {
-  destinations<-req$params$n
-  destinations<-as.integer(destinations)
-  all_destinations<-dbGetQuery(conn, "SELECT * FROM top_destinations")
-  log<-destinations <= nrow(all_destinations)
-  if(log){
-  destinations <- dbGetQuery(conn, sprintf("SELECT * FROM top_destinations LIMIT %s", destinations))
-  return(res$set_status(201L)$json(destinations))
+top_destinations<-function(req, res) {
+  # Validate input 'n' 
+  destinations <- tryCatch(as.integer(req$params$n), warning = function(w) NULL, error = function(e) NULL)
+  
+  if (is.null(destinations) || is.na(destinations) || destinations <= 0) {
+    return(res$set_status(400L)$json(list(error = "Invalid destination count. Must be a positive integer.")))
   }
   
-  msg <- sprintf("Not enough top destinations in db for %s destinations", destinations)
-  return(res$set_status(404L)$json(list(error = msg)))
+  # total available destinations
+  all_destinations <- tryCatch({
+    dbGetQuery(conn, "SELECT * FROM top_destinations")
+  }, error = function(e) {
+    return(res$set_status(500L)$json(list(error = "Database error occurred.")))
+  })
   
-})
+  
+  # Check if requested destinations exceed available count
+  if (destinations > nrow(all_destinations)) {
+    msg <- sprintf("Max top destinations exceeded. Requested: %s, Available: %s", destinations, nrow(all_destinations))
+    return(res$set_status(404L)$json(list(error = msg)))
+  }
+  
+  #proceed to query 
+  query <- "SELECT * FROM top_destinations LIMIT ?"
+  top_destinations <- tryCatch({
+    dbGetQuery(conn, query, params = list(destinations))
+  }, error = function(e) {
+    return(res$set_status(500L)$json(list(error = "Database error occurred while fetching destinations.")))
+  })
+  
+  return(res$set_status(200L)$json(top_destinations))
+}
 
 
-
-# PUT /flights/:id
-app$put("/flights/:id", function(req, res) {
-  id <- as.integer(req$params$id)
-  new_details <- parse_req(req)
-  new_details <- as.data.table(new_details)
+# PUT /flights/:id request handler functio n
+modify_flight<-function(req, res) {
+  id <- suppressWarnings(as.integer(req$params$id))
+  if (is.na(id) || id <= 0) {
+    return(res$set_status(400L)$json(list(error = "Invalid flight ID.")))
+  }
+  
+  new_details <- tryCatch({
+    parsed_content <- parse_req(req)
+    if(is.null(parsed_content)){
+      return(res$set_status(400L)$json(list(error = " missing request body.")))
+    }
+    parsed_content=as.data.table(parsed_content)
+  }, error = function(e) {
+    return(res$set_status(400L)$json(list(error = "Invalid  request body.")))
+  })
+  
+  # Drop 'id' if it exists in request body
+  if ("id" %in% names(new_details)) {
+    new_details[, id := NULL]
+  }
   
   #get the flight to update
   existing_flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %d", id))
@@ -195,30 +277,40 @@ app$put("/flights/:id", function(req, res) {
   
   return(res$json(response))
   
-})
+}
 
 
+## DELETE /:id request handler function
 
-## DELETE /:id
-
-app$delete("/:id", function(req, res) {
-  id <- as.integer(req$params$id)
-  
-  # Check if the flight exists
-  existing_flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %d", id))
-  
-  if (nrow(existing_flight) == 0) {
-    msg <- sprintf("No flight found with id %d", id)
-    return(res$set_status(404L)$json(list(error = msg)))
+delete_flight<-function(req, res) {
+  id <- suppressWarnings(as.integer(req$params$id))
+  if (is.na(id) || id <= 0) {
+    return(res$set_status(400L)$json(list(error = "Invalid flight ID.")))
   }
   
-  # Delete the flight
-  dbExecute(conn, sprintf("DELETE FROM flights WHERE id = %d", id))
-  
-  msg <- sprintf("Flight with id %d successfully deleted", id)
-  return(res$json(list(message = msg)))
-})
+  tryCatch({
+    existing_flight <- dbGetQuery(conn, "SELECT * FROM flights WHERE id = ?", params = list(id))
+    if (nrow(existing_flight) == 0) {
+      return(res$set_status(404L)$json(list(error = sprintf("No flight found with id %d", id))))
+    }
+    
+    # Delete the flight
+    dbExecute(conn, "DELETE FROM flights WHERE id = ?", params = list(id))
+    msg <- sprintf("Flight with id %d successfully deleted", id)
+    res$json(list(message = msg))
+  }, error = function(e) {
+    res$set_status(500L)$json(list(error = "Internal server error"))
+  })
+}
 
-
-app$start(3000)
+Ambiorix$
+  new(port=3000)$
+  get("/flight/:id", get_flights )$
+  post('/flight',post_flight )$
+  get("/check-delay/:id", check_delay)$
+  get("/avg-dep-delay",avg_dep_delay)$
+  get("/top-destinations/:n", top_destinations )$
+  put("/flights/:id",modify_flight )$
+  delete("/:id",delete_flight )$
+  start()
 on.exit(dbDisconnect(conn))
