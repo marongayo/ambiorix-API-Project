@@ -180,8 +180,6 @@ avg_dep_delay<-function(req, res) {
     return(res$json(carrier))
   }
   
-  # Validate airline input
-  airline <- gsub("[^a-zA-Z0-9]", "", airline)
   
   carrier <- tryCatch({
     dbGetQuery(conn, "SELECT avg_dep_delay FROM avg_delay WHERE carrier = ?", params = list(airline))
