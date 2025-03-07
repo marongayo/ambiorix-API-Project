@@ -67,7 +67,7 @@ dbDisconnect(conn)
 
 
 
-conn <- dbConnect(SQLite(), "flights.db")
+
 
 ## Perser function
 # Credit: https://ambiorix.dev/blog/parse-raw-json/
@@ -97,12 +97,14 @@ get_flights<-function(req, res) {
   }
   
   # fetch flight from the db
+  conn <- dbConnect(SQLite(), "flights.db")
   flight <- dbGetQuery(conn, "SELECT * FROM flights WHERE id = ?", params = list(id))
   
   if (nrow(flight) == 0) {
+    dbDisconnect(conn)
     return(res$set_status(404L)$json(list(error = sprintf("No flight found with ID %s", id))))
   }
-  
+  dbDisconnect(conn)
   return(res$set_status(200L)$json(flight))
 }
 
@@ -128,6 +130,7 @@ post_flight<-function(req, res) {
   }
   
   # Insert into database
+  conn <- dbConnect(SQLite(), "flights.db")
   success <- tryCatch({
     dbWriteTable(conn, "flights", content, append = TRUE)
     last_id <- dbGetQuery(conn, "SELECT last_insert_rowid() AS id")$id
@@ -151,7 +154,7 @@ check_delay<- function(req, res) {
     return(res$set_status(400L)$json(list(error = "Invalid flight ID.")))
   }
   
-  
+  conn <- dbConnect(SQLite(), "flights.db")
   flight <- tryCatch({
     dbGetQuery(conn, "SELECT delayed FROM flights WHERE id = ?", params = list(id))
   }, error = function(e) {
@@ -168,6 +171,7 @@ check_delay<- function(req, res) {
 # GET /avg-dep-delay?id=given-airline-name handler function n
 avg_dep_delay<-function(req, res) {
   airline <- req$query$id
+  conn <- dbConnect(SQLite(), "flights.db")
   
   # If no airline is provided, return all airlines' average delays
   if (is.null(airline) || airline == "") {
@@ -205,6 +209,7 @@ top_destinations<-function(req, res) {
   }
   
   # total available destinations
+  conn <- dbConnect(SQLite(), "flights.db")
   all_destinations <- tryCatch({
     dbGetQuery(conn, "SELECT * FROM top_destinations")
   }, error = function(e) {
@@ -253,6 +258,7 @@ modify_flight<-function(req, res) {
   }
   
   #get the flight to update
+  conn <- dbConnect(SQLite(), "flights.db")
   existing_flight <- dbGetQuery(conn, sprintf("SELECT * FROM flights WHERE id = %d", id))
   if (nrow(existing_flight) == 0) {
     msg <- sprintf("No flight found with id %d", id)
@@ -286,6 +292,7 @@ delete_flight<-function(req, res) {
     return(res$set_status(400L)$json(list(error = "Invalid flight ID.")))
   }
   
+  conn <- dbConnect(SQLite(), "flights.db")
   tryCatch({
     existing_flight <- dbGetQuery(conn, "SELECT * FROM flights WHERE id = ?", params = list(id))
     if (nrow(existing_flight) == 0) {
@@ -311,4 +318,3 @@ Ambiorix$
   put("/flights/:id",modify_flight )$
   delete("/:id",delete_flight )$
   start()
-on.exit(dbDisconnect(conn))
